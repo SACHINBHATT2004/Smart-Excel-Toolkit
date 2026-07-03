@@ -321,6 +321,59 @@
       color: var(--text);
     }
 
+
+    .module-sheet-wrap {
+      display: none;
+      margin-top: 10px;
+      padding: 10px 12px;
+      border: 1.5px solid color-mix(in srgb, var(--blue) 24%, var(--border));
+      border-radius: 12px;
+      background: color-mix(in srgb, var(--surface-2) 88%, var(--blue));
+    }
+
+    .module-sheet-wrap select {
+      margin-top: 6px;
+      background: var(--bg);
+    }
+
+    .module-sheet-label {
+      display: block;
+      color: var(--text-soft);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.01em;
+    }
+
+    .group-file-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(180px, 260px);
+      gap: 10px;
+      align-items: center;
+      margin-top: 8px;
+      padding: 9px 10px;
+      border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+      border-radius: 10px;
+      background: color-mix(in srgb, var(--bg) 72%, transparent);
+    }
+
+    .merge-source-sheet-select {
+      height: 38px;
+      font-size: 12.5px;
+      padding: 0 10px;
+      border-color: color-mix(in srgb, var(--blue) 28%, var(--border));
+      background: var(--bg);
+    }
+
+    .sheet-hint {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 5px;
+      color: var(--text-muted);
+      font-size: 11.5px;
+      font-weight: 700;
+    }
+
     .vlookup-pair {
       align-items: start;
     }
@@ -1072,6 +1125,7 @@
       .feature-strip div:last-child { border-bottom: none; }
       .hud-label { display: none; }
       .launch-card { grid-template-columns: 1fr; }
+      .group-file-row { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -1165,6 +1219,10 @@
         </div>
         <div class="divider"></div>
         <input type="file" id="excelFile" />
+        <div id="breakerSheetWrap" class="module-sheet-wrap">
+          <label class="module-sheet-label" for="breakerSheet">Worksheet</label>
+          <select id="breakerSheet"><option value="">Select Sheet</option></select>
+        </div>
         <div class="spacer"></div>
         <select id="columnName"><option value="">Select Column Name</option></select>
         <div class="actions">
@@ -1209,11 +1267,19 @@
         <div class="finder-grid">
           <div>
             <input type="file" id="finderPrimaryFile" />
+            <div id="finderPrimarySheetWrap" class="module-sheet-wrap">
+              <label class="module-sheet-label" for="finderPrimarySheet">Primary Worksheet</label>
+              <select id="finderPrimarySheet"><option value="">Select Sheet</option></select>
+            </div>
             <div class="spacer"></div>
             <select id="finderPrimaryColumn"><option value="">Select Primary Column</option></select>
           </div>
           <div>
             <input type="file" id="finderSecondaryFile" />
+            <div id="finderSecondarySheetWrap" class="module-sheet-wrap">
+              <label class="module-sheet-label" for="finderSecondarySheet">Secondary Worksheet</label>
+              <select id="finderSecondarySheet"><option value="">Select Sheet</option></select>
+            </div>
             <div class="spacer"></div>
             <select id="finderSecondaryColumn"><option value="">Select Secondary Column</option></select>
           </div>
@@ -1481,6 +1547,9 @@
     let latestSummaryData = [];
     let selectedBreakerGroups = new Set();
     let commonFinderResults = null;
+    let breakerWorkbook = null;
+    let finderPrimaryWorkbook = null;
+    let finderSecondaryWorkbook = null;
     let excelDataUpdaterResult = null;
     let updaterSourceWorkbook = null;
     let updaterTargetWorkbook = null;
@@ -1536,11 +1605,14 @@
     async function uploadExcel() {
       const file = document.getElementById('excelFile').files[0];
       const column = document.getElementById('columnName').value.trim();
-      if (!file || !column) { alert('Please select a file and enter a column name'); return; }
-      const data = await file.arrayBuffer();
-      const workbook = XLSX.read(data);
-      const sheet = workbook.Sheets[workbook.SheetNames[0]];
-      const json = XLSX.utils.sheet_to_json(sheet);
+      if (!file || !column) { alert('Please select a file and column'); return; }
+      if (!breakerWorkbook) {
+        const data = await file.arrayBuffer();
+        breakerWorkbook = XLSX.read(data);
+        fillSheetSelect(breakerWorkbook, 'breakerSheet', 'Select Sheet');
+      }
+      const sheetName = document.getElementById('breakerSheet').value || breakerWorkbook.SheetNames[0];
+      const json = getRowsFromWorkbook(breakerWorkbook, sheetName);
       excelSheets = {};
       latestSummaryData = [];
       selectedBreakerGroups = new Set();
@@ -1770,6 +1842,8 @@
       document.getElementById('excelResult').style.display = 'none';
       document.getElementById('selectedBreakerSummaryPreview').style.display = 'none';
       document.getElementById('excelFile').value = '';
+      document.getElementById('breakerSheet').innerHTML = '<option value="">Select Sheet</option>';
+      document.getElementById('breakerSheetWrap').style.display = 'none';
       document.getElementById('columnName').innerHTML = '<option value="">Select Column Name</option>';
       document.getElementById('summaryControls').style.display = 'none';
       document.getElementById('customSummaryBox').style.display = 'none';
@@ -1779,16 +1853,42 @@
       excelSheets = {};
       latestSummaryData = [];
       selectedBreakerGroups = new Set();
+      breakerWorkbook = null;
     }
 
-    function addGroup(event) {
+    async function addGroup(event) {
       const files = Array.from(event.target.files);
       if (!files.length) return;
       let sheetName = prompt('Sheet name for this group after merge?');
       if (!sheetName || !sheetName.trim()) { alert('Sheet name is required'); return; }
-      groupedFiles.push({ sheetName: sheetName.trim(), files });
+
+      const preparedFiles = [];
+      for (const file of files) {
+        try {
+          const buffer = await file.arrayBuffer();
+          const workbook = XLSX.read(buffer);
+          const sheetNames = workbook.SheetNames || [];
+          preparedFiles.push({
+            file,
+            workbook,
+            sheetNames,
+            selectedSheet: sheetNames[0] || ''
+          });
+        } catch (err) {
+          alert(`Could not read ${file.name}. Please upload a valid Excel file.`);
+          return;
+        }
+      }
+
+      groupedFiles.push({ sheetName: sheetName.trim(), files: preparedFiles });
       renderGroups();
       event.target.value = '';
+    }
+
+    function updateMergeSourceSheet(groupIndex, fileIndex, sheetName) {
+      if (!groupedFiles[groupIndex] || !groupedFiles[groupIndex].files[fileIndex]) return;
+      groupedFiles[groupIndex].files[fileIndex].selectedSheet = sheetName;
+      playSfx('select');
     }
 
     function renderGroups() {
@@ -1796,11 +1896,23 @@
       container.innerHTML = '';
       if (!groupedFiles.length) { container.style.display = 'none'; return; }
       container.style.display = 'block';
-      groupedFiles.forEach(group => {
+      groupedFiles.forEach((group, groupIndex) => {
         const div = document.createElement('div');
         div.className = 'groupBox';
-        let html = `<div class="group-title">📑 ${group.sheetName}</div>`;
-        group.files.forEach(f => { html += `<div class="group-file">📄 ${f.name}</div>`; });
+        let html = `<div class="group-title">📑 ${escapeHtml(group.sheetName)}</div>`;
+        group.files.forEach((item, fileIndex) => {
+          const sheetSelect = item.sheetNames.length > 1
+            ? `<select class="merge-source-sheet-select" onchange="updateMergeSourceSheet(${groupIndex}, ${fileIndex}, this.value)">${item.sheetNames.map(name => `<option value="${escapeHtml(name)}" ${name === item.selectedSheet ? 'selected' : ''}>${escapeHtml(name)}</option>`).join('')}</select>`
+            : `<span class="sheet-hint">Sheet: ${escapeHtml(item.selectedSheet || 'Sheet1')}</span>`;
+          html += `
+            <div class="group-file-row">
+              <div>
+                <div class="group-file">📄 ${escapeHtml(item.file.name)}</div>
+                ${item.sheetNames.length > 1 ? '<span class="sheet-hint">Multiple worksheets found. Select the sheet to merge.</span>' : ''}
+              </div>
+              ${sheetSelect}
+            </div>`;
+        });
         div.innerHTML = html;
         container.appendChild(div);
       });
@@ -1811,10 +1923,10 @@
       const zip = new JSZip();
       const fileMap = {};
       groupedFiles.forEach(group => {
-        group.files.forEach(file => {
-          let base = file.name.replace(/admission/gi,'').replace(/registration/gi,'').replace(/registrations/gi,'').replace(/_/g,'').replace(/-/g,'').replace(/\s/g,'').replace('.xlsx','').toLowerCase();
+        group.files.forEach(item => {
+          let base = item.file.name.replace(/admission/gi,'').replace(/registration/gi,'').replace(/registrations/gi,'').replace(/_/g,'').replace(/-/g,'').replace(/\s/g,'').replace('.xlsx','').toLowerCase();
           if (!fileMap[base]) fileMap[base] = [];
-          fileMap[base].push({ file, sheetName: group.sheetName });
+          fileMap[base].push({ file: item.file, workbook: item.workbook, sourceSheet: item.selectedSheet, sheetName: group.sheetName });
         });
       });
       for (let key in fileMap) {
@@ -1822,9 +1934,7 @@
         const newWB = XLSX.utils.book_new();
         for (let i = 0; i < cur.length; i++) {
           const c = cur[i];
-          const data = await c.file.arrayBuffer();
-          const wb = XLSX.read(data);
-          const sheet = wb.Sheets[wb.SheetNames[0]];
+          const sheet = c.workbook.Sheets[c.sourceSheet] || c.workbook.Sheets[c.workbook.SheetNames[0]];
           let sName = c.sheetName;
           if (i > 0) sName += '_' + (i + 1);
           XLSX.utils.book_append_sheet(newWB, sheet, sName.substring(0, 31));
@@ -1881,8 +1991,12 @@
       const pCol = document.getElementById('finderPrimaryColumn').value;
       const sCol = document.getElementById('finderSecondaryColumn').value;
       if (!pFile || !sFile || !pCol || !sCol) { alert('Please select both files and columns'); return; }
-      const pJson = getRowsAndSheet(await pFile.arrayBuffer());
-      const sJson = getRowsAndSheet(await sFile.arrayBuffer());
+      if (!finderPrimaryWorkbook) finderPrimaryWorkbook = XLSX.read(await pFile.arrayBuffer());
+      if (!finderSecondaryWorkbook) finderSecondaryWorkbook = XLSX.read(await sFile.arrayBuffer());
+      const primarySheet = document.getElementById('finderPrimarySheet').value || finderPrimaryWorkbook.SheetNames[0];
+      const secondarySheet = document.getElementById('finderSecondarySheet').value || finderSecondaryWorkbook.SheetNames[0];
+      const pJson = getRowsFromWorkbook(finderPrimaryWorkbook, primarySheet);
+      const sJson = getRowsFromWorkbook(finderSecondaryWorkbook, secondarySheet);
       const secondaryMap = new Map();
       sJson.forEach((row, index) => {
         const key = normalizeValue(row[sCol]);
@@ -1965,6 +2079,10 @@
     function clearCommonFinder() {
       document.getElementById('finderPrimaryFile').value = '';
       document.getElementById('finderSecondaryFile').value = '';
+      document.getElementById('finderPrimarySheet').innerHTML = '<option value="">Select Sheet</option>';
+      document.getElementById('finderSecondarySheet').innerHTML = '<option value="">Select Sheet</option>';
+      document.getElementById('finderPrimarySheetWrap').style.display = 'none';
+      document.getElementById('finderSecondarySheetWrap').style.display = 'none';
       document.getElementById('finderPrimaryColumn').innerHTML = '<option value="">Select Primary Column</option>';
       document.getElementById('finderSecondaryColumn').innerHTML = '<option value="">Select Secondary Column</option>';
       document.getElementById('finderStatus').style.display = 'none';
@@ -1972,10 +2090,67 @@
       document.getElementById('finderDownloadWrap').style.display = 'none';
       resetCommonFinderPrompt();
       commonFinderResults = null;
+      finderPrimaryWorkbook = null;
+      finderSecondaryWorkbook = null;
     }
 
 
-    function fillSheetSelect(workbook, selectId, placeholder) {
+    
+    async function loadBreakerWorkbook(file) {
+      if (!file) return;
+      try {
+        const buffer = await file.arrayBuffer();
+        breakerWorkbook = XLSX.read(buffer);
+        fillSheetSelect(breakerWorkbook, 'breakerSheet', 'Select Sheet');
+        refreshBreakerSheetColumns();
+      } catch (err) {
+        alert('Please upload a valid Excel file.');
+      }
+    }
+
+    function refreshBreakerSheetColumns() {
+      const sheetName = document.getElementById('breakerSheet').value || (breakerWorkbook && breakerWorkbook.SheetNames[0]);
+      const headers = getHeadersFromWorkbook(breakerWorkbook, sheetName);
+      fillColumnSelectFromHeaders(headers, 'columnName', 'Select Column Name');
+    }
+
+    async function loadFinderPrimaryWorkbook(file) {
+      if (!file) return;
+      try {
+        const buffer = await file.arrayBuffer();
+        finderPrimaryWorkbook = XLSX.read(buffer);
+        fillSheetSelect(finderPrimaryWorkbook, 'finderPrimarySheet', 'Select Sheet');
+        refreshFinderPrimarySheetColumns();
+      } catch (err) {
+        alert('Please upload a valid primary Excel file.');
+      }
+    }
+
+    async function loadFinderSecondaryWorkbook(file) {
+      if (!file) return;
+      try {
+        const buffer = await file.arrayBuffer();
+        finderSecondaryWorkbook = XLSX.read(buffer);
+        fillSheetSelect(finderSecondaryWorkbook, 'finderSecondarySheet', 'Select Sheet');
+        refreshFinderSecondarySheetColumns();
+      } catch (err) {
+        alert('Please upload a valid secondary Excel file.');
+      }
+    }
+
+    function refreshFinderPrimarySheetColumns() {
+      const sheetName = document.getElementById('finderPrimarySheet').value || (finderPrimaryWorkbook && finderPrimaryWorkbook.SheetNames[0]);
+      const headers = getHeadersFromWorkbook(finderPrimaryWorkbook, sheetName);
+      fillColumnSelectFromHeaders(headers, 'finderPrimaryColumn', 'Select Primary Column');
+    }
+
+    function refreshFinderSecondarySheetColumns() {
+      const sheetName = document.getElementById('finderSecondarySheet').value || (finderSecondaryWorkbook && finderSecondaryWorkbook.SheetNames[0]);
+      const headers = getHeadersFromWorkbook(finderSecondaryWorkbook, sheetName);
+      fillColumnSelectFromHeaders(headers, 'finderSecondaryColumn', 'Select Secondary Column');
+    }
+
+function fillSheetSelect(workbook, selectId, placeholder) {
       const sel = document.getElementById(selectId);
       const wrap = document.getElementById(selectId + 'Wrap');
       sel.innerHTML = `<option value="">${placeholder}</option>`;
@@ -2177,9 +2352,12 @@
     }
 
 
-    document.getElementById('finderPrimaryFile').addEventListener('change', function() { loadColumns(this.files[0], 'finderPrimaryColumn'); });
-    document.getElementById('finderSecondaryFile').addEventListener('change', function() { loadColumns(this.files[0], 'finderSecondaryColumn'); });
-    document.getElementById('excelFile').addEventListener('change', function() { loadColumns(this.files[0], 'columnName'); });
+    document.getElementById('finderPrimaryFile').addEventListener('change', function() { loadFinderPrimaryWorkbook(this.files[0]); });
+    document.getElementById('finderSecondaryFile').addEventListener('change', function() { loadFinderSecondaryWorkbook(this.files[0]); });
+    document.getElementById('excelFile').addEventListener('change', function() { loadBreakerWorkbook(this.files[0]); });
+    document.getElementById('breakerSheet').addEventListener('change', refreshBreakerSheetColumns);
+    document.getElementById('finderPrimarySheet').addEventListener('change', refreshFinderPrimarySheetColumns);
+    document.getElementById('finderSecondarySheet').addEventListener('change', refreshFinderSecondarySheetColumns);
     document.getElementById('updaterSourceFile').addEventListener('change', function() { loadUpdaterSourceColumns(this.files[0]); });
     document.getElementById('updaterTargetFile').addEventListener('change', function() { loadUpdaterTargetColumns(this.files[0]); });
     document.getElementById('updaterSourceSheet').addEventListener('change', refreshUpdaterSourceSheetColumns);
